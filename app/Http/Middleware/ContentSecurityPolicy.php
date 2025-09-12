@@ -18,78 +18,62 @@ class ContentSecurityPolicy
     {
         $response = $next($request);
 
-        // Generate a nonce for inline scripts
-        $nonce = base64_encode(random_bytes(16));
-        $request->attributes->set('csp_nonce', $nonce);
-
-        // Get the hash of the main app.js file for integrity
-        $appJsHash = $this->getScriptHash('/js/app.js');
-        
-        $isDev = config('app.debug', false);
-        
-        if ($isDev) {
-            // Development CSP - allows eval for Alpine.js but with reporting
-            $csp = [
-                "default-src 'self'",
-                "script-src 'self' 'nonce-{$nonce}' 'unsafe-eval'",
-                "style-src 'self' 'unsafe-inline'",
-                "img-src 'self' data: https:",
-                "font-src 'self'",
-                "connect-src 'self'",
-                "frame-ancestors 'none'",
-                "base-uri 'self'",
-                "form-action 'self'",
-                "report-uri /csp-report"
-            ];
-        } else {
-            // Production CSP - more restrictive but allows necessary Alpine.js functionality
-            $csp = [
-                "default-src 'self'",
-                "script-src 'self' 'nonce-{$nonce}'" . ($appJsHash ? " 'sha256-{$appJsHash}'" : ''),
-                "style-src 'self' 'unsafe-inline'", // Tailwind CSS needs this
-                "img-src 'self' data: https:",
-                "font-src 'self'",
-                "connect-src 'self'",
-                "frame-ancestors 'none'",
-                "base-uri 'self'",
-                "form-action 'self'",
-                "report-uri /csp-report"
-            ];
+        // Check if CSP is enabled
+        if (!config('csp.enabled', true)) {
+            return $response;
         }
 
-        // Set both CSP and CSP Report Only for gradual deployment
-        $response->headers->set('Content-Security-Policy-Report-Only', implode('; ', $csp));
-        
-        // For now, use a permissive CSP to avoid breaking functionality
-        $permissiveCsp = [
-            "default-src 'self'",
-            "script-src 'self' 'nonce-{$nonce}' 'unsafe-eval' 'unsafe-inline'",
-            "style-src 'self' 'unsafe-inline'",
-            "img-src 'self' data: https:",
-            "font-src 'self'",
-            "connect-src 'self'",
-            "frame-ancestors 'none'",
-            "base-uri 'self'",
-            "form-action 'self'"
-        ];
-        
-        $response->headers->set('Content-Security-Policy', implode('; ', $permissiveCsp));
+        // Generate a nonce for inline scripts
+        $nonce = $this->generateNonce();
+        $request->attributes->set('csp_nonce', $nonce);
+
+        // Build CSP policy
+        $cspPolicy = $this->buildCspPolicy($nonce);
+
+        // Apply CSP headers
+        if (config('csp.report_only', false)) {
+            $response->headers->set('Content-Security-Policy-Report-Only', $cspPolicy);
+        } else {
+            $response->headers->set('Content-Security-Policy', $cspPolicy);
+        }
 
         return $response;
     }
 
     /**
-     * Get the SHA256 hash of a script file for CSP
+     * Generate a cryptographically secure nonce
      */
-    private function getScriptHash($scriptPath)
+    private function generateNonce()
     {
-        $fullPath = public_path($scriptPath);
-        
-        if (!file_exists($fullPath)) {
-            return null;
-        }
-        
-        $content = file_get_contents($fullPath);
-        return base64_encode(hash('sha256', $content, true));
+        $length = config('csp.nonce.length', 16);
+        return base64_encode(random_bytes($length));
     }
+
+    /**
+     * Build the CSP policy string
+     */
+    private function buildCspPolicy($nonce)
+    {
+        $directives = config('csp.directives', []);
+        $policy = [];
+
+        foreach ($directives as $directive => $sources) {
+            $sources = array_filter($sources); // Remove null values
+            
+            // Add nonce to script-src and style-src if enabled
+            if (in_array($directive, ['script-src', 'style-src']) && config('csp.nonce.enabled', true)) {
+                $sources[] = "'nonce-{$nonce}'";
+            }
+            
+            $policy[] = $directive . ' ' . implode(' ', $sources);
+        }
+
+        // Add report URI if configured
+        if ($reportUri = config('csp.report_uri')) {
+            $policy[] = 'report-uri ' . $reportUri;
+        }
+
+        return implode('; ', $policy);
+    }
+
 }
